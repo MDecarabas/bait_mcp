@@ -1,0 +1,24 @@
+launcher:
+  worker_startup_timeout_s: 10
+  shutdown_timeout_s: 5
+
+worker:
+  endpoint: "tcp://127.0.0.1:5556"
+  request_timeout_ms: 30000
+
+mcp:
+  host: "0.0.0.0"
+  port: 8051
+  path: "/mcp"
+
+oas:
+  url: "ws://127.0.0.1:8002"   # keep in sync with host/port below
+  host: "127.0.0.1"
+  port: 8002
+  auto_start: true             # launcher spawns the vendored OAS when true
+  request_timeout_s: 5.0
+
+bits:
+  package: "mcp_instrument"    # default instrument to bring up (string)
+  packages:                    # string -> that instrument's OAS startup file
+    mcp_instrument: "/Users/ecodrea/eric-bits/src/mcp_instrument/configs/oas_startup.py"
