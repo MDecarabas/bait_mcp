@@ -12,13 +12,15 @@ mcp:
   path: "/mcp"
 
 oas:
-  url: "ws://127.0.0.1:8002"   # keep in sync with host/port below
-  host: "127.0.0.1"
+  url: "ws://127.0.0.1:8002"   # worker connects here; keep in sync with host/port
+  host: "127.0.0.1"            # launcher binds the vendored OAS here
   port: 8002
-  auto_start: true             # launcher spawns the vendored OAS when true
   request_timeout_s: 5.0
 
 bits:
-  package: "mcp_instrument"    # default instrument to bring up (string)
-  packages:                    # string -> that instrument's OAS startup file
-    mcp_instrument: "/Users/ecodrea/eric-bits/src/mcp_instrument/configs/oas_startup.py"
+  # Importable BITS package name. The launcher resolves <package>/startup.py from
+  # it and spawns OAS against that file, so the exposed devices are exactly what
+  # the package's startup.py loads into its oregistry. The package MUST be
+  # installed in the environment you launch from (see the conda note in README) —
+  # bait_mcp refuses to start otherwise. Override at launch with --bits-package.
+  package: "mcp_instrument"

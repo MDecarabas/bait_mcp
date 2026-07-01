@@ -25,16 +25,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "url": "ws://127.0.0.1:8002",
         "host": "127.0.0.1",
         "port": 8002,
-        "auto_start": True,
         "request_timeout_s": 5.0,
     },
     "bits": {
+        # Importable BITS package name. The launcher resolves <package>/startup.py
+        # from it and spawns OAS against that file, so the exposed devices are
+        # exactly what the package's startup.py loads into its oregistry.
+        # bait_mcp refuses to start if this package is not importable in the
+        # environment it runs in — there is no sim/standalone fallback.
         "package": "mcp_instrument",
-        "packages": {
-            "mcp_instrument": (
-                "/Users/ecodrea/eric-bits/src/mcp_instrument/configs/oas_startup.py"
-            ),
-        },
     },
 }
 

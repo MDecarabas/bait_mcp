@@ -8,7 +8,7 @@ This repo is an MCP server that exposes ophyd devices over MCP via an OAS (Ophyd
 
 - **MCP frontend** (`mcp_server.py`): asyncio FastMCP HTTP server. Exposes two tools (`read_device`, `set_device`). Holds no ophyd state. Each tool call forwards to the worker via `WorkerClient.request`, wrapped in `asyncio.to_thread` so the synchronous ZMQ I/O does not stall the event loop.
 - **Ophyd worker** (`worker.py`): synchronous, single-threaded ZMQ REP server. Owns the OAS WebSocket protocol — opens a short-lived `websockets.sync.client` connection per call, subscribes, reads/sets, closes. Processes one ZMQ request at a time.
-- **Launcher** (`launcher.py`): when `oas.auto_start` is set, first resolves the selected instrument's OAS startup file (from `bits.package` / `bits.packages`), spawns the vendored OAS (`python -m bait_mcp.ophyd_websocket.server` on `oas.port`, with `OAS_STARTUP_DIR` set so its device registry auto-loads), and waits via `wait_for_oas` (polls `/api/v1/devices`, falling back to `POST /load-devices`). Then spawns the worker, polls `health` until ready (`wait_for_worker`), then the MCP frontend. Forwards SIGINT/SIGTERM to all children with a bounded shutdown timeout.
+- **Launcher** (`launcher.py`): resolves the selected BITS package's `startup.py` by import name (`resolve_startup_file` → `importlib.util.find_spec(bits.package)` → `<package_dir>/startup.py`), and **refuses to start** if the package is not importable in this environment. Then spawns the vendored OAS (`python -m bait_mcp.ophyd_websocket.server` on `oas.port`, with `OAS_STARTUP_DIR` set so its device registry auto-loads that `startup.py`), waits via `wait_for_oas` (polls `/api/v1/devices`, falling back to `POST /load-devices`), spawns the worker, polls `health` until ready (`wait_for_worker`), then the MCP frontend. Forwards SIGINT/SIGTERM to all children with a bounded shutdown timeout.
 - **Wire protocol** (`protocol.py`): JSON over ZMQ REQ/REP. `{method, params}` request, `{status: ok|error, result|error}` response. `WorkerClient` creates a fresh REQ socket per call (REQ/REP is strict lock-step; sharing across calls would deadlock on out-of-order replies or timeouts).
 
 ### Why two processes here
@@ -24,11 +24,11 @@ If neither rationale survives, this whole package can collapse to a single FastM
 
 The OAS server lives in this package at `src/bait_mcp/ophyd_websocket/` (vendored from the upstream ophyd-websocket copy, which is unpublished). It runs as `python -m bait_mcp.ophyd_websocket.server --startup-dir <file>`. Operationally:
 
-- When `oas.auto_start` is true, the launcher spawns it automatically on `oas.host:oas.port` (default `127.0.0.1:8002`) against the startup file resolved from `bits.packages[bits.package]`. To point at an already-running OAS instead, set `oas.auto_start: false` and `oas.url` to that server.
-- The worker connects to `oas.url` + `/api/v1/device-socket` and speaks the OAS device-socket protocol (subscribe/set/unsubscribe). The device the MCP reads/sets is OAS's own instance, loaded from the startup file — a separate process from any bluesky RunEngine / queueserver.
+- The launcher always spawns it on `oas.host:oas.port` (default `127.0.0.1:8002`) against the `startup.py` resolved from the importable `bits.package`. There is no external-OAS mode: bait_mcp owns the OAS process, and requires a resolvable BITS package to run.
+- The worker connects to `oas.url` + `/api/v1/device-socket` and speaks the OAS device-socket protocol (subscribe/set/unsubscribe). The device the MCP reads/sets is OAS's own instance, loaded from the BITS package's `startup.py`. That `startup.py` runs in full inside the OAS process (it builds its own RunEngine, catalog, etc.), separate from any queueserver's bluesky session.
 - Local patch to keep track of: `routers/device_socket.py` `handleSet` uses `getattr(device, "low_limit"/"high_limit", None)` so limitless devices (e.g. `ophyd.sim` `SynAxis`) are movable instead of raising `AttributeError`. This should be upstreamed to ophyd-websocket.
 
-Selecting an instrument: `bits.packages` maps a name → that instrument's OAS startup file (a Python file with module-level ophyd device instances; OAS keys them by variable name). Pass `--bits-package <name>` or set `bits.package`. The mapping is a path lookup only — this package does not import instrument packages.
+Selecting an instrument: `bits.package` is the **importable name** of a BITS package. The launcher resolves `<package>/startup.py` from it via `importlib.util.find_spec` and points OAS at that file; the devices exposed are exactly what `startup.py` loads into its `oregistry` (OAS's `device_registry` duck-types the Guarneri/BITS registry and harvests every device). Pass `--bits-package <name>` or set `bits.package`. The package **must be importable** in the launch environment (typically the conda env with the instrument installed) — bait_mcp does resolve/require the package, and has no sim/standalone fallback.
 
 If you change the OAS device-socket protocol or URL path, update the worker (`_WS_PATH`, subscribe/set handlers) and the vendored OAS in lockstep.
 
@@ -41,8 +41,8 @@ Sections:
 - `launcher` — startup/shutdown timeouts.
 - `worker` — ZMQ bind/connect endpoint, request timeout.
 - `mcp` — FastMCP HTTP host/port/path.
-- `oas` — `url` the worker connects to (e.g. `ws://127.0.0.1:8002`), `host`/`port` the launcher binds the vendored OAS to (keep in sync with `url`), `auto_start` (launcher spawns OAS when true), and the per-call WebSocket timeout.
-- `bits` — `package` (default instrument name) and `packages` (name → OAS startup file path) used to launch OAS for the selected instrument.
+- `oas` — `url` the worker connects to (e.g. `ws://127.0.0.1:8002`), `host`/`port` the launcher binds the vendored OAS to (keep in sync with `url`), and the per-call WebSocket timeout.
+- `bits` — `package`: the importable BITS package name whose `startup.py` OAS loads devices from. Override with `--bits-package`. Required — bait_mcp refuses to start if it is unset or not importable.
 
 ## Commands
 

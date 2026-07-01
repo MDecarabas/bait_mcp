@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -26,9 +27,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mcp-path", help="MCP HTTP path.")
     parser.add_argument(
         "--bits-package",
-        help="Name of the BITS instrument to bring up (key in config bits.packages).",
+        help="Importable BITS package name whose startup.py OAS loads devices from.",
     )
     return parser
+
+
+def resolve_startup_file(package: str) -> str:
+    """Resolve ``<package>/startup.py`` from an importable BITS package.
+
+    bait_mcp is a frontend to a BITS instrument: it exposes exactly the devices
+    that package's ``startup.py`` loads. Refuse to start if the package is not
+    importable here, or has no ``startup.py`` — there is no standalone fallback.
+    """
+    try:
+        spec = importlib.util.find_spec(package)
+    except (ImportError, ValueError) as exc:
+        raise RuntimeError(
+            f"bits package {package!r} is not importable in this environment "
+            f"({exc}). Install it (e.g. into the conda env) before launching."
+        ) from exc
+    if spec is None or not spec.origin:
+        raise RuntimeError(
+            f"bits package {package!r} is not installed in this environment. "
+            f"bait_mcp requires an importable BITS package."
+        )
+    startup_file = Path(spec.origin).parent / "startup.py"
+    if not startup_file.exists():
+        raise RuntimeError(
+            f"bits package {package!r} has no startup.py at {startup_file}."
+        )
+    return str(startup_file)
 
 
 def wait_for_worker(endpoint: str, timeout_s: float, request_timeout_ms: int) -> None:
@@ -122,24 +150,16 @@ def main() -> int:
     mcp_path = args.mcp_path or config["mcp"]["path"]
 
     oas_config = config.get("oas", {})
-    oas_auto_start = bool(oas_config.get("auto_start", False))
     oas_host = str(oas_config.get("host", "127.0.0.1"))
     oas_port = int(oas_config.get("port", 8002))
-    oas_startup_file: str | None = None
-    if oas_auto_start:
-        bits_config = config.get("bits", {})
-        bits_package = args.bits_package or bits_config.get("package")
-        packages = bits_config.get("packages", {})
-        if not bits_package or bits_package not in packages:
-            raise RuntimeError(
-                f"bits package {bits_package!r} not found in config bits.packages "
-                f"(known: {sorted(packages)})"
-            )
-        oas_startup_file = packages[bits_package]
-        if not Path(oas_startup_file).exists():
-            raise RuntimeError(
-                f"OAS startup file for {bits_package!r} does not exist: {oas_startup_file}"
-            )
+
+    bits_package = args.bits_package or config.get("bits", {}).get("package")
+    if not bits_package:
+        raise RuntimeError(
+            "No bits package configured. bait_mcp requires a BITS package: set "
+            "bits.package in the config or pass --bits-package."
+        )
+    oas_startup_file = resolve_startup_file(bits_package)
 
     worker_script = shutil.which("bait-mcp-worker")
     mcp_script = shutil.which("bait-mcp-server")
@@ -176,25 +196,24 @@ def main() -> int:
     previous_sigint = signal.signal(signal.SIGINT, handle_signal)
     previous_sigterm = signal.signal(signal.SIGTERM, handle_signal)
     try:
-        if oas_auto_start and oas_startup_file is not None:
-            oas_env = os.environ.copy()
-            oas_env["OAS_HOST"] = oas_host
-            oas_env["OAS_PORT"] = str(oas_port)
-            oas_env["OAS_REQUIRE_QSERVER"] = "false"
-            # Set before the OAS process imports its device_registry singleton so
-            # it auto-loads devices from the startup file at import time.
-            oas_env["OAS_STARTUP_DIR"] = oas_startup_file
-            oas_cmd = [
-                sys.executable,
-                "-m",
-                "bait_mcp.ophyd_websocket.server",
-                "--startup-dir",
-                oas_startup_file,
-            ]
-            oas_process = subprocess.Popen(oas_cmd, env=oas_env)
-            processes.append(oas_process)
-            # OAS cold start imports ophyd/fastapi and loads devices; allow extra time.
-            wait_for_oas(oas_host, oas_port, max(float(startup_timeout_s), 30.0))
+        oas_env = os.environ.copy()
+        oas_env["OAS_HOST"] = oas_host
+        oas_env["OAS_PORT"] = str(oas_port)
+        oas_env["OAS_REQUIRE_QSERVER"] = "false"
+        # Set before the OAS process imports its device_registry singleton so
+        # it auto-loads devices from the bits package's startup.py at import time.
+        oas_env["OAS_STARTUP_DIR"] = oas_startup_file
+        oas_cmd = [
+            sys.executable,
+            "-m",
+            "bait_mcp.ophyd_websocket.server",
+            "--startup-dir",
+            oas_startup_file,
+        ]
+        oas_process = subprocess.Popen(oas_cmd, env=oas_env)
+        processes.append(oas_process)
+        # OAS cold start imports ophyd/fastapi and loads devices; allow extra time.
+        wait_for_oas(oas_host, oas_port, max(float(startup_timeout_s), 30.0))
 
         worker_process = subprocess.Popen(worker_cmd)
         processes.append(worker_process)
