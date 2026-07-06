@@ -135,6 +135,60 @@ def terminate_processes(processes: list[subprocess.Popen[bytes]], timeout_s: flo
         process.wait()
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def kill_stale_servers(timeout_s: float = 5.0) -> None:
+    """Terminate any pre-existing bait_mcp servers before starting fresh ones.
+
+    Prevents an orphaned launcher / frontend / worker / OAS from holding our
+    ports across restarts. Scoped to bait_mcp's own process signatures only, so
+    it never matches unrelated tools running from the same venv (e.g. an editor's
+    language server). Skips this launcher's own PID. SIGTERM first (lets the
+    launcher shut its children down cleanly), SIGKILL any that outlive the wait.
+    """
+    patterns = (r"bait_mcp\.ophyd_websocket\.server", "/bin/bait-mcp")
+    self_pid = os.getpid()
+    pids: set[int] = set()
+    for pattern in patterns:
+        result = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+        for token in result.stdout.split():
+            try:
+                pid = int(token)
+            except ValueError:
+                continue
+            if pid != self_pid:
+                pids.add(pid)
+
+    if not pids:
+        return
+
+    for pid in pids:
+        print(f"[launcher] killing stale bait_mcp process {pid}", file=sys.stderr)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and any(_pid_alive(p) for p in pids):
+        time.sleep(0.1)
+
+    for pid in pids:
+        if _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def main() -> int:
     args = build_parser().parse_args()
     config = load_config(args.config)
@@ -152,6 +206,19 @@ def main() -> int:
     oas_config = config.get("oas", {})
     oas_host = str(oas_config.get("host", "127.0.0.1"))
     oas_port = int(oas_config.get("port", 8002))
+
+    # The OAS process runs the bits startup.py, which writes RunEngine metadata,
+    # logs, and any data files to CWD-relative paths. Pin that CWD explicitly so
+    # nothing lands in the bait_mcp repo (or wherever the launcher happens to run).
+    oas_workdir_cfg = oas_config.get("workdir")
+    if not oas_workdir_cfg:
+        raise RuntimeError(
+            "oas.workdir is not set. bait_mcp requires an explicit directory for "
+            "the OAS/bits session's output (RunEngine metadata, logs, data files); "
+            "set oas.workdir in the config to an absolute path."
+        )
+    oas_workdir = Path(oas_workdir_cfg).expanduser()
+    oas_workdir.mkdir(parents=True, exist_ok=True)
 
     bits_package = args.bits_package or config.get("bits", {}).get("package")
     if not bits_package:
@@ -184,6 +251,10 @@ def main() -> int:
         worker_cmd.extend(["--config", args.config])
         mcp_cmd.extend(["--config", args.config])
 
+    # Clean up any orphaned bait_mcp servers before starting, so a stale process
+    # can't hold our ports. Bounded by the launcher's shutdown timeout.
+    kill_stale_servers(shutdown_timeout_s)
+
     processes: list[subprocess.Popen[bytes]] = []
     shutting_down = False
 
@@ -210,7 +281,7 @@ def main() -> int:
             "--startup-dir",
             oas_startup_file,
         ]
-        oas_process = subprocess.Popen(oas_cmd, env=oas_env)
+        oas_process = subprocess.Popen(oas_cmd, env=oas_env, cwd=str(oas_workdir))
         processes.append(oas_process)
         # OAS cold start imports ophyd/fastapi and loads devices; allow extra time.
         wait_for_oas(oas_host, oas_port, max(float(startup_timeout_s), 30.0))

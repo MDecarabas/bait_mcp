@@ -26,6 +26,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8002,
         "request_timeout_s": 5.0,
+        # Required: absolute directory the OAS process runs in. The bits
+        # startup.py writes RunEngine metadata / logs / data files to
+        # CWD-relative paths, so this is where that data lands. No default —
+        # the launcher refuses to start until it is set.
+        "workdir": None,
     },
     "bits": {
         # Importable BITS package name. The launcher resolves <package>/startup.py

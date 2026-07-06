@@ -8,7 +8,7 @@ This repo is an MCP server that exposes ophyd devices over MCP via an OAS (Ophyd
 
 - **MCP frontend** (`mcp_server.py`): asyncio FastMCP HTTP server. Exposes two tools (`read_device`, `set_device`). Holds no ophyd state. Each tool call forwards to the worker via `WorkerClient.request`, wrapped in `asyncio.to_thread` so the synchronous ZMQ I/O does not stall the event loop.
 - **Ophyd worker** (`worker.py`): synchronous, single-threaded ZMQ REP server. Owns the OAS WebSocket protocol — opens a short-lived `websockets.sync.client` connection per call, subscribes, reads/sets, closes. Processes one ZMQ request at a time.
-- **Launcher** (`launcher.py`): resolves the selected BITS package's `startup.py` by import name (`resolve_startup_file` → `importlib.util.find_spec(bits.package)` → `<package_dir>/startup.py`), and **refuses to start** if the package is not importable in this environment. Then spawns the vendored OAS (`python -m bait_mcp.ophyd_websocket.server` on `oas.port`, with `OAS_STARTUP_DIR` set so its device registry auto-loads that `startup.py`), waits via `wait_for_oas` (polls `/api/v1/devices`, falling back to `POST /load-devices`), spawns the worker, polls `health` until ready (`wait_for_worker`), then the MCP frontend. Forwards SIGINT/SIGTERM to all children with a bounded shutdown timeout.
+- **Launcher** (`launcher.py`): on startup, first runs `kill_stale_servers()` to SIGTERM (then SIGKILL) any pre-existing bait_mcp servers so an orphan can't hold our ports — scoped to `bait_mcp.ophyd_websocket.server` and `/bin/bait-mcp` signatures, excluding its own PID, so it never hits unrelated venv processes (e.g. an editor LSP). Then resolves the selected BITS package's `startup.py` by import name (`resolve_startup_file` → `importlib.util.find_spec(bits.package)` → `<package_dir>/startup.py`), and **refuses to start** if the package is not importable in this environment. Then spawns the vendored OAS (`python -m bait_mcp.ophyd_websocket.server` on `oas.port`, with `OAS_STARTUP_DIR` set so its device registry auto-loads that `startup.py`, and with `cwd=oas.workdir` so the bits session's CWD-relative outputs land there instead of the bait_mcp repo), waits via `wait_for_oas` (polls `/api/v1/devices`, falling back to `POST /load-devices`), spawns the worker, polls `health` until ready (`wait_for_worker`), then the MCP frontend. Forwards SIGINT/SIGTERM to all children with a bounded shutdown timeout.
 - **Wire protocol** (`protocol.py`): JSON over ZMQ REQ/REP. `{method, params}` request, `{status: ok|error, result|error}` response. `WorkerClient` creates a fresh REQ socket per call (REQ/REP is strict lock-step; sharing across calls would deadlock on out-of-order replies or timeouts).
 
 ### Why two processes here
@@ -41,7 +41,7 @@ Sections:
 - `launcher` — startup/shutdown timeouts.
 - `worker` — ZMQ bind/connect endpoint, request timeout.
 - `mcp` — FastMCP HTTP host/port/path.
-- `oas` — `url` the worker connects to (e.g. `ws://127.0.0.1:8002`), `host`/`port` the launcher binds the vendored OAS to (keep in sync with `url`), and the per-call WebSocket timeout.
+- `oas` — `url` the worker connects to (e.g. `ws://127.0.0.1:8002`), `host`/`port` the launcher binds the vendored OAS to (keep in sync with `url`), the per-call WebSocket timeout, and `workdir` (**required**, no default): the absolute directory the OAS process runs in. The bits `startup.py` writes RunEngine metadata / logs / data files to CWD-relative paths, so `workdir` is where that data lands — the launcher refuses to start until it is set, keeping data out of the bait_mcp repo.
 - `bits` — `package`: the importable BITS package name whose `startup.py` OAS loads devices from. Override with `--bits-package`. Required — bait_mcp refuses to start if it is unset or not importable.
 
 ## Commands
@@ -52,6 +52,7 @@ uv run bait-mcp --config configs/example.yaml     # launch OAS + worker + fronte
 uv run bait-mcp --config configs/example.yaml --bits-package mcp_instrument  # pick the instrument
 uv run bait-mcp-worker --config configs/example.yaml --bind tcp://127.0.0.1:5556  # worker only
 uv run bait-mcp-server --config configs/example.yaml --worker tcp://127.0.0.1:5556  # frontend only
+./scripts/kill_bait.sh                            # kill orphaned OAS/frontend/worker (not the mypy LSP)
 
 # In the shared conda env (has ophyd/EPICS + all instrument packages):
 conda run -n bait_mcp_dev pip install -e .        # install into the env

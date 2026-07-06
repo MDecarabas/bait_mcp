@@ -121,6 +121,24 @@ uv run bait-mcp-server \
   --path /mcp
 ```
 
+## Stop background servers
+
+The launcher **auto-cleans on startup**: before spawning, `bait-mcp` terminates
+any pre-existing bait_mcp servers (a prior launcher, MCP frontend, worker, or
+spawned OAS) so an orphan can't hold ports 8051/8002. So a normal restart clears
+stragglers on its own. (Caveat: this means you cannot run two instruments at
+once — the second launch kills the first. They would collide on the same ports
+anyway.)
+
+To kill them manually without launching (same precise scoping):
+
+```bash
+./scripts/kill_bait.sh
+```
+
+Both are scoped to bait_mcp's own processes and will not touch unrelated tools
+that happen to run from `bait_mcp/.venv` (such as an editor's language server).
+
 ## MCP client configuration
 
 ```json
@@ -159,7 +177,26 @@ protocol (use OAS REST `PUT /devices` for that case).
 - `oas.host`, `oas.port` — where the launcher binds the vendored OAS (keep in sync with `oas.url`).
 - `oas.url` — base URL the worker connects to (it appends `/api/v1/device-socket`).
 - `oas.request_timeout_s` — default per-call OAS WebSocket timeout.
+- `oas.workdir` — **required**, absolute path. Working directory for the OAS process; see [Where data is written](#where-data-is-written).
 - `bits.package` — importable BITS package name; the launcher loads `<package>/startup.py`. Override with `--bits-package`.
+
+## Where data is written
+
+The OAS process runs the bits package's `startup.py` in full, which builds a
+RunEngine. bits persists RunEngine metadata (`.re_md_dict.yml`), and — if enabled
+— logs and NeXus/SPEC data files, to paths that apsbits resolves **relative to
+the working directory**. To keep that data out of the bait_mcp repo (and out of
+wherever you happen to launch from), `oas.workdir` is **required**: the launcher
+runs the OAS process with that directory as its CWD, creating it if needed. It
+has no default — bait_mcp refuses to start until you set it:
+
+```yaml
+oas:
+  workdir: "/abs/path/to/instrument/data"
+```
+
+Point it at your instrument's data area (e.g. inside the bits repo, or a
+dedicated data directory) — anywhere except the bait_mcp repo.
 
 ## Safety / HITL
 
