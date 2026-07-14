@@ -6,10 +6,11 @@ devices of its own**: device reads/writes run in the queueserver's *live* sessio
 and plans go through the queue. The whole server is an **MCP frontend + one 0MQ
 client** — no ophyd, no EPICS, no second device session.
 
-- **Device I/O** runs the instrument's `read_device`/`set_device` functions in the
-  RE Worker (`function_execute`). Reads run in the background (safe during a plan);
-  writes run in the foreground, so the RunEngine serializes them — a write during
-  a running plan is refused by the queueserver. That is the safety interlock.
+- **Device I/O** runs bait_mcp's injected `read_device`/`set_device` helpers in the
+  RE Worker (`function_execute`; see [How stuff works](#how-stuff-works)). Reads run
+  in the background (safe during a plan); writes run in the foreground, so the
+  RunEngine serializes them — a write during a running plan is refused by the
+  queueserver. That is the safety interlock.
 - **Plans** are listed, enqueued, and run through the queueserver.
 
 ## What a BITS repo must provide (the instrument contract)
@@ -44,6 +45,55 @@ does **not** require editing the instrument's `startup.py`. bait_mcp injects its
 3. **A running queueserver with the environment open.** bait_mcp does not manage
    the queueserver lifecycle. If the environment is closed or the RE Manager is
    unreachable, device I/O returns `{"ok": false, "error": ...}`.
+
+## How stuff works
+
+bait_mcp is a thin 0MQ client of the queueserver. Two kinds of operation:
+
+- **Plans / queue** — direct RE Manager calls (`list_plans`, `add_plan`,
+  `start_queue`, `run_plan`, …). Clean and boring.
+- **Device I/O** — the ugly part, described below.
+
+### Device I/O by function injection (the ugly bit)
+
+The queueserver has no generic "read/set this device" endpoint. It runs *plans*
+and *permitted functions that already exist in the RE Worker namespace*. We want
+ad-hoc reads/writes against the live devices **without** (a) standing up a second
+ophyd session inside bait_mcp, or (b) editing the instrument's `startup.py`.
+
+So bait_mcp does something a bit gross: on the first device call it
+**`script_upload`s a small string of Python** (`qserver_client.py:_DEVICE_IO_SCRIPT`)
+that *defines* `read_device`/`set_device` **into the running worker namespace**,
+then invokes them with `function_execute`. They run in the worker — where the live
+`oregistry` is — and hand the value back via the task result.
+
+Per device call (`_call_function`):
+
+1. `_ensure_device_functions()` — if not already done this session, `script_upload`
+   the definitions and cache a flag (one upload per environment, not per call).
+2. `function_execute(read_device|set_device, …)` → wait for the task → return value.
+3. If it fails with *"not found in the worker namespace"* (the environment was
+   closed/reopened, wiping the injected functions), reset the flag, re-inject once,
+   and retry.
+
+### Why it's ugly, and the sharp edges
+
+- **It `exec`s a code string into a live process.** That's a side channel, not an
+  API — bait_mcp carries device-I/O source as a string constant.
+- **The queueserver still gates it.** `function_execute` enforces
+  `allowed_functions` no matter how the function was defined, so the names must be
+  permitted (or you connect as an allow-all group). Injection buys "no `startup.py`
+  edit," **not** "no config at all."
+- **It assumes `oregistry`** exists in the worker namespace (BITS/Guarneri builds it).
+- **A first call while a plan is running may not inject** (the worker is busy). In
+  practice the functions inject on the first idle call and persist for the
+  environment's life, so this is a rare edge.
+
+### The clean alternative we rejected
+
+The obvious clean design is to define the two functions in the instrument's
+`startup.py`. The constraint is that `startup.py` must not be modified — so the
+injection is the price of keeping the instrument untouched.
 
 ## Setup
 
