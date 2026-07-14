@@ -1,31 +1,23 @@
-launcher:
-  worker_startup_timeout_s: 10
-  shutdown_timeout_s: 5
-
-worker:
-  endpoint: "tcp://127.0.0.1:5556"
-  request_timeout_ms: 30000
+# bait_mcp configuration. Values here deep-merge over DEFAULT_CONFIG in
+# src/bait_mcp/config.py; CLI flags override YAML per process.
 
 mcp:
-  host: "0.0.0.0"
+  # This endpoint can write devices and run plans and is unauthenticated, so it
+  # binds loopback by default. Set 0.0.0.0 only if you intend to expose it.
+  host: "127.0.0.1"
   port: 8051
   path: "/mcp"
 
-oas:
-  url: "ws://127.0.0.1:8002"   # worker connects here; keep in sync with host/port
-  host: "127.0.0.1"            # launcher binds the vendored OAS here
-  port: 8002
-  request_timeout_s: 5.0
-  # REQUIRED: absolute directory the OAS process runs in. The bits startup.py
-  # writes RunEngine metadata (.re_md_dict.yml), logs, and data files to
-  # CWD-relative paths, so this is where that data lands — keep it out of the
-  # bait_mcp repo. The launcher refuses to start until this is set.
-  # workdir: "/abs/path/to/instrument/data"
+qserver:
+  # bluesky-queueserver RE Manager 0MQ control address. Keep in sync with the
+  # instrument's qserver/qs-config.yml (network.zmq_control_addr).
+  zmq_control_addr: "tcp://localhost:60615"
+  # Seconds to wait for a function/task to complete.
+  timeout: 600
+  # Identity bait_mcp presents. user_group must permit read_device/set_device and
+  # the plans in the instrument's user_group_permissions.yaml.
+  user: "bait_mcp"
+  user_group: "primary"
 
-bits:
-  # Importable BITS package name. The launcher resolves <package>/startup.py from
-  # it and spawns OAS against that file, so the exposed devices are exactly what
-  # the package's startup.py loads into its oregistry. The package MUST be
-  # installed in the environment you launch from (see the conda note in README) —
-  # bait_mcp refuses to start otherwise. Override at launch with --bits-package.
-  package: "mcp_instrument"
+launcher:
+  shutdown_timeout_s: 5

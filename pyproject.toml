@@ -1,26 +1,20 @@
 [project]
 name = "bait-mcp"
 version = "0.1.0"
-description = "MCP server exposing ophyd devices via OAS (ophyd-as-a-service) for Bluesky/BITS instruments."
+description = "MCP server exposing a Bluesky/BITS instrument to LLM agents via the bluesky-queueserver."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.9.0",
     "pyyaml>=6.0.0",
-    "pyzmq>=26.0.0",
-    "websockets>=13.0",
-    # Vendored OAS server (src/bait_mcp/ophyd_websocket) — launcher can spawn it.
-    "ophyd>=1.9.0",
-    "fastapi>=0.110.0",
-    "uvicorn>=0.29.0",
-    "numpy>=1.24.0",
-    "httpx>=0.27.0",
-    "pillow>=10.0.0",
+    "bluesky-queueserver-api>=0.0.13",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
 
 [project.scripts]
 bait-mcp = "bait_mcp.launcher:main"
-bait-mcp-worker = "bait_mcp.worker:main"
 bait-mcp-server = "bait_mcp.mcp_server:main"
 
 [build-system]
@@ -29,3 +23,13 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 package = true
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true

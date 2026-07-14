@@ -1,4 +1,4 @@
-"""MCP server exposing ophyd devices via OAS for Bluesky/BITS instruments."""
+"""MCP server exposing a Bluesky/BITS instrument to LLM agents via the bluesky-queueserver."""
 
 __all__ = ["__version__"]
 

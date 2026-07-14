@@ -4,73 +4,85 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-This repo is an MCP server that exposes ophyd devices over MCP via an OAS (Ophyd-as-a-Service) WebSocket endpoint. The MCP frontend/worker structure intentionally mirrors `control_suite_mcp_aps_12id` — same layout, same protocol/zmq_client/launcher pattern. OAS itself is **vendored in this package** (`src/bait_mcp/ophyd_websocket/`, see "OAS is vendored here") and the launcher can start it, so a single `bait-mcp` invocation brings up OAS + worker + frontend.
+bait_mcp is an MCP server that exposes a Bluesky/BITS instrument to LLM agents by
+talking to its **bluesky-queueserver** over the 0MQ control API. It holds **no
+ophyd devices of its own** — device reads/writes run as permitted functions in
+the queueserver's *live* RE Worker session, and plans go through the queue. The
+whole server is an **MCP frontend + one 0MQ client**.
 
-- **MCP frontend** (`mcp_server.py`): asyncio FastMCP HTTP server. Exposes two tools (`read_device`, `set_device`). Holds no ophyd state. Each tool call forwards to the worker via `WorkerClient.request`, wrapped in `asyncio.to_thread` so the synchronous ZMQ I/O does not stall the event loop.
-- **Ophyd worker** (`worker.py`): synchronous, single-threaded ZMQ REP server. Owns the OAS WebSocket protocol — opens a short-lived `websockets.sync.client` connection per call, subscribes, reads/sets, closes. Processes one ZMQ request at a time.
-- **Launcher** (`launcher.py`): on startup, first runs `kill_stale_servers()` to SIGTERM (then SIGKILL) any pre-existing bait_mcp servers so an orphan can't hold our ports — scoped to `bait_mcp.ophyd_websocket.server` and `/bin/bait-mcp` signatures, excluding its own PID, so it never hits unrelated venv processes (e.g. an editor LSP). Then resolves the selected BITS package's `startup.py` by import name (`resolve_startup_file` → `importlib.util.find_spec(bits.package)` → `<package_dir>/startup.py`), and **refuses to start** if the package is not importable in this environment. Then spawns the vendored OAS (`python -m bait_mcp.ophyd_websocket.server` on `oas.port`, with `OAS_STARTUP_DIR` set so its device registry auto-loads that `startup.py`, and with `cwd=oas.workdir` so the bits session's CWD-relative outputs land there instead of the bait_mcp repo), waits via `wait_for_oas` (polls `/api/v1/devices`, falling back to `POST /load-devices`), spawns the worker, polls `health` until ready (`wait_for_worker`), then the MCP frontend. Forwards SIGINT/SIGTERM to all children with a bounded shutdown timeout.
-- **Wire protocol** (`protocol.py`): JSON over ZMQ REQ/REP. `{method, params}` request, `{status: ok|error, result|error}` response. `WorkerClient` creates a fresh REQ socket per call (REQ/REP is strict lock-step; sharing across calls would deadlock on out-of-order replies or timeouts).
+- **MCP frontend** (`mcp_server.py`): asyncio FastMCP HTTP server. Registers the
+  tools and forwards each to the client via `asyncio.to_thread` (the client is
+  synchronous/blocking). Holds no state beyond the client.
+- **Queueserver client** (`qserver_client.py`): thin synchronous wrapper over
+  `bluesky_queueserver_api.zmq.REManagerAPI`. Normalizes every call to
+  `{"ok": bool, ...}` so tools never raise across the boundary.
+  - **Device I/O** runs the instrument's `read_device`/`set_device` functions via
+    `function_execute`. **Reads use `run_in_background=True`** (safe while a plan
+    runs); **writes run in the foreground** so the RunEngine serializes them — a
+    write attempted mid-plan is refused/deferred by the queueserver. *That* is the
+    safety interlock; there is no separate interlock code.
+  - **Plans/queue** use `plans_allowed`/`devices_allowed`, `status`, `item_add`,
+    `queue_start`/`queue_stop`, `item_execute`.
+- **Launcher** (`launcher.py`): now just cleans up stale servers and spawns the
+  frontend, forwarding signals with a bounded shutdown. The frontend can also run
+  standalone (`bait-mcp-server`).
 
-### Why two processes here
+### Requirements this places on the instrument
 
-In `control_suite_mcp_aps_12id` the two-process split is load-bearing because the underlying control stack is genuinely blocking and not asyncio-friendly. Here the split is **not justified by blocking I/O** — `websockets.sync.client` calls are network I/O that could live inside the asyncio event loop. The split is kept for two reasons:
+bait_mcp injects its `read_device`/`set_device` helpers into the RE Worker
+namespace via `script_upload` (see `qserver_client.py:_DEVICE_IO_SCRIPT` and
+`_ensure_device_functions`), so the instrument's `startup.py` is **not** modified.
+The instrument must still:
 
-1. **Structural consistency with control_suite_mcp_aps_12id** — operators and tooling treat both MCP servers the same way.
-2. **Future extensibility** — if we add MCP tools that *do* need to drive an ophyd session in-process (instead of via OAS), the worker is already the right place for them.
+- **permit** `read_device`/`set_device` in the connecting group's
+  `allowed_functions` (`user_group_permissions.yaml`) — the queueserver enforces
+  this regardless of how a function was defined (verified: an unpermitted but
+  injected function is refused); and
+- expose an `oregistry` in the worker namespace (the injected helpers use
+  `oregistry[name]`).
 
-If neither rationale survives, this whole package can collapse to a single FastMCP process with the WS client inline. Don't do that without checking.
+Device I/O also requires the queueserver **environment to be open**. bait_mcp does
+not manage the queueserver lifecycle; if the env is closed, the call fails and the
+error surfaces in `{"ok": false}`. See `README.md` → "What a BITS repo must provide."
 
-### OAS is vendored here
+### Tools exposed
 
-The OAS server lives in this package at `src/bait_mcp/ophyd_websocket/` (vendored from the upstream ophyd-websocket copy, which is unpublished). It runs as `python -m bait_mcp.ophyd_websocket.server --startup-dir <file>`. Operationally:
-
-- The launcher always spawns it on `oas.host:oas.port` (default `127.0.0.1:8002`) against the `startup.py` resolved from the importable `bits.package`. There is no external-OAS mode: bait_mcp owns the OAS process, and requires a resolvable BITS package to run.
-- The worker connects to `oas.url` + `/api/v1/device-socket` and speaks the OAS device-socket protocol (subscribe/set/unsubscribe). The device the MCP reads/sets is OAS's own instance, loaded from the BITS package's `startup.py`. That `startup.py` runs in full inside the OAS process (it builds its own RunEngine, catalog, etc.), separate from any queueserver's bluesky session.
-- Local patch to keep track of: `routers/device_socket.py` `handleSet` uses `getattr(device, "low_limit"/"high_limit", None)` so limitless devices (e.g. `ophyd.sim` `SynAxis`) are movable instead of raising `AttributeError`. This should be upstreamed to ophyd-websocket.
-
-Selecting an instrument: `bits.package` is the **importable name** of a BITS package. The launcher resolves `<package>/startup.py` from it via `importlib.util.find_spec` and points OAS at that file; the devices exposed are exactly what `startup.py` loads into its `oregistry` (OAS's `device_registry` duck-types the Guarneri/BITS registry and harvests every device). Pass `--bits-package <name>` or set `bits.package`. The package **must be importable** in the launch environment (typically the conda env with the instrument installed) — bait_mcp does resolve/require the package, and has no sim/standalone fallback.
-
-If you change the OAS device-socket protocol or URL path, update the worker (`_WS_PATH`, subscribe/set handlers) and the vendored OAS in lockstep.
+`read_device`, `set_device`, `list_devices`, `describe_device`, `list_plans`,
+`describe_plan`, `queue_status`, `add_plan`, `start_queue`, `stop_queue`,
+`run_plan`. All return `{"ok": bool, ...}`.
 
 ## Configuration
 
-YAML config (`configs/example.yaml`) deep-merges over `DEFAULT_CONFIG` in `config.py`. CLI flags override YAML for that process only. The launcher passes `--config` through to both children so all three layers see the same file.
+YAML config (`configs/example.yaml`) deep-merges over `DEFAULT_CONFIG` in
+`config.py`; CLI flags override YAML per process. Active sections:
 
-Sections:
-
-- `launcher` — startup/shutdown timeouts.
-- `worker` — ZMQ bind/connect endpoint, request timeout.
-- `mcp` — FastMCP HTTP host/port/path.
-- `oas` — `url` the worker connects to (e.g. `ws://127.0.0.1:8002`), `host`/`port` the launcher binds the vendored OAS to (keep in sync with `url`), the per-call WebSocket timeout, and `workdir` (**required**, no default): the absolute directory the OAS process runs in. The bits `startup.py` writes RunEngine metadata / logs / data files to CWD-relative paths, so `workdir` is where that data lands — the launcher refuses to start until it is set, keeping data out of the bait_mcp repo.
-- `bits` — `package`: the importable BITS package name whose `startup.py` OAS loads devices from. Override with `--bits-package`. Required — bait_mcp refuses to start if it is unset or not importable.
+- `mcp` — FastMCP HTTP `host`/`port`/`path`. `host` defaults to `127.0.0.1`
+  because this endpoint can write devices and run plans and is unauthenticated;
+  set `0.0.0.0` explicitly to expose it.
+- `qserver` — `zmq_control_addr` (RE Manager 0MQ, keep in sync with the
+  instrument's `qs-config.yml`), `timeout` (seconds to await a task), `user`,
+  `user_group` (must permit the device functions + plans).
+- `launcher` — shutdown timeout.
 
 ## Commands
 
 ```bash
-uv sync                                           # install (uv-managed .venv)
-uv run bait-mcp --config configs/example.yaml     # launch OAS + worker + frontend
-uv run bait-mcp --config configs/example.yaml --bits-package mcp_instrument  # pick the instrument
-uv run bait-mcp-worker --config configs/example.yaml --bind tcp://127.0.0.1:5556  # worker only
-uv run bait-mcp-server --config configs/example.yaml --worker tcp://127.0.0.1:5556  # frontend only
-./scripts/kill_bait.sh                            # kill orphaned OAS/frontend/worker (not the mypy LSP)
+uv sync
+uv run bait-mcp --config configs/example.yaml        # launch the frontend
+uv run bait-mcp-server --config configs/example.yaml  # frontend only (standalone)
+./scripts/kill_bait.sh                                # kill strays
 
-# In the shared conda env (has ophyd/EPICS + all instrument packages):
-conda run -n bait_mcp_dev pip install -e .        # install into the env
-conda run -n bait_mcp_dev bait-mcp --config configs/example.yaml --bits-package mcp_instrument
+# In the shared conda env (has bluesky-queueserver-api etc.):
+conda run -n bait_mcp_dev pip install -e .
+PYTHONPATH=src python -m pytest tests/ -q             # unit tests
+python -m ruff check src/bait_mcp tests               # lint (excludes dormant code)
 ```
 
-No test suite or linter is configured yet.
-
-## Worker conventions
-
-- Methods on `OphydMCPWorker`: `health`, `read_device`, `set_device`. To add a method, add the handler and register it in `dispatch()`. Keep handler signatures small and JSON-serializable.
-- Every OAS call is a **short-lived** connection. Subscribe-on-connect, do the operation, close. Do not introduce a persistent WebSocket — OAS `device_socket` keeps subscribe state per-connection, and a long-lived client would need reconnect logic that isn't worth it at LLM cadence.
-- The worker is single-threaded and holds no state between calls. Do not add caching, do not add image buffers. If you need any of that, think hard about whether it belongs in this package or in the consumer.
+Tests live in `tests/` (mock `REManagerAPI`; no live qserver needed). Ruff/mypy
+config is in `pyproject.toml`.
 
 ## HITL is a consumer concern — not implemented here
 
-`set_device` executes the write the moment it's called. There is **no** approval gate on this side. tomo-bait's bits_agent currently implements approval via `pending_writes` + `/chat/confirm` *before* invoking its in-process set tool; that pattern moves with the consumer when it switches to this MCP. If a future tool needs server-enforced safety (e.g. queueserver-running check), add it as an explicit policy in the worker rather than burying it inside `set_device`.
-
-## Duplicated WebSocket client
-
-Both the OAS **client** protocol handling in `worker.py` (subscribe/set/recv loops, `_subscribe_and_confirm`, `_try_unsubscribe`) and the OAS **server** in `src/bait_mcp/ophyd_websocket/` are copies of the upstream ophyd-websocket / `tomo-bait/src/bait/` code. This is intentional — bait_mcp has **no runtime dependency on tomo-bait**; it carries its own copies. The clean fix is to publish ophyd-websocket (and a tiny client) as standalone packages; until that exists, keep the copies equivalent on protocol semantics and upstream local fixes (e.g. the `handleSet` limit guard above). If you change one, change the other.
+`set_device` and `run_plan` actuate immediately. There is **no** approval gate on
+this side; the consumer (e.g. EAA) must gate actuation. bait_mcp only enforces the
+machine-level interlock (foreground writes serialize behind the RE).

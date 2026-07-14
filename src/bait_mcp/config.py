@@ -6,39 +6,27 @@ from typing import Any
 
 import yaml
 
-
 DEFAULT_CONFIG: dict[str, Any] = {
     "launcher": {
-        "worker_startup_timeout_s": 10.0,
         "shutdown_timeout_s": 5.0,
     },
-    "worker": {
-        "endpoint": "tcp://127.0.0.1:5556",
-        "request_timeout_ms": 30000,
-    },
     "mcp": {
-        "host": "0.0.0.0",
+        # Bind loopback by default: this endpoint can write devices and run plans,
+        # and is unauthenticated. Set to 0.0.0.0 explicitly to expose it.
+        "host": "127.0.0.1",
         "port": 8051,
         "path": "/mcp",
     },
-    "oas": {
-        "url": "ws://127.0.0.1:8002",
-        "host": "127.0.0.1",
-        "port": 8002,
-        "request_timeout_s": 5.0,
-        # Required: absolute directory the OAS process runs in. The bits
-        # startup.py writes RunEngine metadata / logs / data files to
-        # CWD-relative paths, so this is where that data lands. No default —
-        # the launcher refuses to start until it is set.
-        "workdir": None,
-    },
-    "bits": {
-        # Importable BITS package name. The launcher resolves <package>/startup.py
-        # from it and spawns OAS against that file, so the exposed devices are
-        # exactly what the package's startup.py loads into its oregistry.
-        # bait_mcp refuses to start if this package is not importable in the
-        # environment it runs in — there is no sim/standalone fallback.
-        "package": "mcp_instrument",
+    "qserver": {
+        # bluesky-queueserver RE Manager 0MQ control address. Device I/O and plans
+        # both go through this; keep in sync with the instrument's qs-config.yml.
+        "zmq_control_addr": "tcp://localhost:60615",
+        # Seconds to wait for a function/task to complete (wait_for_completed_task).
+        "timeout": 600,
+        # Identity bait_mcp presents. user_group must permit read_device/set_device
+        # and the plans in the instrument's user_group_permissions.yaml.
+        "user": "bait_mcp",
+        "user_group": "primary",
     },
 }
 
