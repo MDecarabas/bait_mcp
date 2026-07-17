@@ -138,10 +138,39 @@ def test_functions_injected_once(client):
 
 def test_reinjects_when_function_missing(client):
     c, fake = client
+    # The real queueserver message (profile_ops.py) interpolates the function name.
     fake.task_results = [
-        {"result": {"success": False, "traceback": "not found in the worker namespace"}},
+        {"result": {"success": False,
+                    "traceback": "Function 'read_device' is not found in the worker namespace"}},
         {"result": {"success": True, "return_value": {"motor": {"value": 2}}}},
     ]
     out = c.read_device("sim_motor")
     assert out["ok"] is True  # succeeded on retry
-    assert fake.script_uploads == 2  # initial inject + re-inject after "not found"
+    assert fake.script_uploads == 2  # initial inject + re-inject after the missing-fn error
+
+
+def test_reinjects_when_missing_message_reworded(client):
+    # Guards against pinning one exact phrase: a reworded "not defined" message
+    # must still trigger the re-inject (would fail before the substring fix).
+    c, fake = client
+    fake.task_results = [
+        {"result": {"success": False,
+                    "traceback": "Function 'read_device' is not defined in the worker namespace"}},
+        {"result": {"success": True, "return_value": {"motor": {"value": 3}}}},
+    ]
+    out = c.read_device("sim_motor")
+    assert out["ok"] is True
+    assert fake.script_uploads == 2
+
+
+def test_ordinary_device_error_does_not_reinject(client):
+    # A real device error (bad device name) has the function name in its traceback
+    # frame but none of the "not available" phrases, so it must NOT re-inject.
+    c, fake = client
+    fake.task_result_value = {
+        "result": {"success": False,
+                   "traceback": 'File "<string>", line 2, in read_device\nKeyError: \'nope\''}
+    }
+    out = c.read_device("nope")
+    assert out["ok"] is False
+    assert fake.script_uploads == 1  # injected once, no spurious re-inject

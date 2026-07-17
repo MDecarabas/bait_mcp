@@ -90,11 +90,27 @@ class QServerClient:
         environment was restarted and the function vanished."""
         self._ensure_device_functions()
         out = self._invoke(name, args, background=background, timeout=timeout)
-        if not out["ok"] and "not found in the worker namespace" in str(out.get("error", "")):
+        if not out["ok"] and self._is_missing_function(name, out.get("error", "")):
             self._functions_injected = False
             self._ensure_device_functions()
             out = self._invoke(name, args, background=background, timeout=timeout)
         return out
+
+    @staticmethod
+    def _is_missing_function(name: str, error: Any) -> bool:
+        """True if `error` looks like the queueserver reporting our injected
+        function is absent (the environment was restarted, wiping it).
+
+        The real message is ``Function 'read_device' is not found in the worker
+        namespace`` (queueserver ``profile_ops.py``). We match on stable tokens —
+        the function name plus a "not available" phrase — rather than that one
+        exact string, so a reworded queueserver message still triggers the
+        re-inject. The function name keeps this from firing on ordinary device
+        errors (e.g. a bad device name), whose traceback lacks those phrases."""
+        err = str(error).lower()
+        return name.lower() in err and any(
+            phrase in err for phrase in ("not found", "not defined", "does not exist")
+        )
 
     @staticmethod
     def _normalize_task_result(result: Any) -> dict[str, Any]:

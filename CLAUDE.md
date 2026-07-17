@@ -45,6 +45,13 @@ Device I/O also requires the queueserver **environment to be open**. bait_mcp do
 not manage the queueserver lifecycle; if the env is closed, the call fails and the
 error surfaces in `{"ok": false}`. See `README.md` → "What a BITS repo must provide."
 
+Injection is lazy (first device call) and re-injected automatically if the
+environment restarts — detected by `_is_missing_function`, which matches stable
+tokens in the queueserver's missing-function error (function name + a "not
+available" phrase), not one exact phrase, so a reworded message still self-heals. A
+cold first device call that lands mid-plan can fail to inject (the worker is busy);
+the manual workaround is in `README.md` → "Potential issues".
+
 ### Tools exposed
 
 `read_device`, `set_device`, `list_devices`, `describe_device`, `list_plans`,

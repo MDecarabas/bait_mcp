@@ -25,7 +25,9 @@ one 0MQ client, with no ophyd/OAS/worker of its own.
   `script_upload` (`_DEVICE_IO_SCRIPT`), so bait_mcp works against any BITS
   instrument that permits the two functions and exposes an `oregistry` — no
   `startup.py` edit required. Injection is lazy (once per env) with a
-  re-inject-on-restart retry.
+  re-inject-on-restart retry that matches the queueserver's missing-function
+  error on stable tokens (function name + a "not available" phrase), not one
+  exact string, so a reworded message still self-heals (`_is_missing_function`).
 - **Single source of truth for discovery.** `list_devices`/`list_plans` /
   `describe_*` read `devices_allowed`/`plans_allowed` straight from the qserver —
   no second registry to drift out of sync.
@@ -43,13 +45,10 @@ one 0MQ client, with no ophyd/OAS/worker of its own.
   source `exec`'d into a live process, not an API. It works, but it is inherently
   more fragile than a real endpoint and couples bait_mcp to the worker's internals
   (`oregistry`).
-- **Re-inject detection is a substring match.** The retry fires only when the error
-  contains `"not found in the worker namespace"` (`_call_function`). If the
-  queueserver rewords that message, the automatic re-inject silently stops working.
 - **First call during a running plan may not inject.** `script_upload` needs an idle
   worker; a cold client whose very first device call lands mid-plan can fail to
-  inject and won't self-heal until an idle call. Documented as rare, but there is no
-  warm-up inject at startup.
+  inject and won't self-heal until an idle call. There is no warm-up inject at
+  startup; the workaround is documented in README → "Potential issues".
 - **Readings must be JSON-serializable, and that isn't enforced.** `read_device`
   returns whatever `oregistry[name].read()` yields; numpy-valued signals can break
   serialization. The requirement is documented but not coerced or validated.
@@ -65,21 +64,23 @@ one 0MQ client, with no ophyd/OAS/worker of its own.
 
 ## Next steps (roughly in priority order)
 
-1. **Harden re-inject detection.** Match a more stable signal than the
-   `"not found in the worker namespace"` substring — e.g. confirm the functions are
-   present before calling, or key off a structured error field if the API exposes
-   one.
-2. **Add a startup warm-up inject (optional).** Inject `read_device`/`set_device`
+1. **Add a startup warm-up inject (optional).** Inject `read_device`/`set_device`
    when the client is constructed / env is confirmed open, so the first device call
-   during a plan doesn't fail.
-3. **Add a marked live-qserver integration test.** Exercise the real round-trip and
+   during a plan doesn't fail. Until then the manual workaround is documented in
+   README → "Potential issues".
+2. **Add a marked live-qserver integration test.** Exercise the real round-trip and
    the foreground-write interlock against a sim instrument; mark it manual/optional
    so unit runs stay hermetic.
-4. **Coerce or validate non-serializable readings** in `read_device` (numpy →
+3. **Coerce or validate non-serializable readings** in `read_device` (numpy →
    Python scalars), or reject them with a clear error rather than failing in the
    transport.
-5. **Add a subscription/streaming path** only if a consumer needs live values —
+4. **Add a subscription/streaming path** only if a consumer needs live values —
    currently out of scope, tracked here so the gap isn't forgotten.
+
+Done: hardened re-inject detection — `_is_missing_function` now matches stable
+tokens (function name + a "not available" phrase) instead of one exact substring,
+so a reworded queueserver message still triggers the automatic re-inject
+(`test_reinjects_when_missing_message_reworded`).
 
 ## Leftover / legacy code to remove on further revisions
 

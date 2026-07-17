@@ -72,9 +72,11 @@ Per device call (`_call_function`):
 1. `_ensure_device_functions()` — if not already done this session, `script_upload`
    the definitions and cache a flag (one upload per environment, not per call).
 2. `function_execute(read_device|set_device, …)` → wait for the task → return value.
-3. If it fails with *"not found in the worker namespace"* (the environment was
-   closed/reopened, wiping the injected functions), reset the flag, re-inject once,
-   and retry.
+3. If it fails because the function is missing (the environment was closed/reopened,
+   wiping the injected functions), reset the flag, re-inject once, and retry. The
+   check (`_is_missing_function`) matches stable tokens in the queueserver error —
+   the function name plus a "not available" phrase — rather than one exact string,
+   so a reworded message still self-heals.
 
 ### Why it's ugly, and the sharp edges
 
@@ -164,6 +166,41 @@ per process.
 | `qserver.user` | Identity bait_mcp presents | `bait_mcp` | — |
 | `qserver.user_group` | Permission group (must allow the functions/plans) | `primary` | — |
 | `launcher.shutdown_timeout_s` | Grace period before children are killed | `5.0` | — |
+
+## Potential issues
+
+Device I/O returns `{"ok": false, "error": ...}` instead of raising, so problems show
+up as failed tool calls, not crashes. The common ones and how to clear them quickly:
+
+### First device call during a running plan fails to inject
+
+**Symptom.** Right after bait_mcp starts, the *first* `read_device`/`set_device` call
+returns `{"ok": false}` with a "not found in the worker namespace" error — but only
+when that first call happens while a plan is running.
+
+**Cause.** bait_mcp injects its `read_device`/`set_device` helpers lazily, on the
+first device call, via `script_upload` — which needs an **idle** worker. If the very
+first call lands mid-plan, the worker is busy and injection can't happen, so the call
+fails. It is *not* a permissions or connectivity problem.
+
+**Fix / avoid.** Warm up the injection once while the queueserver is idle, **before**
+starting a plan — e.g. call `read_device` on any device once after the environment
+opens. The helpers then persist for the life of the environment, so later reads work
+normally *during* plans. If you hit the error mid-plan, just retry the call once the
+queue goes idle and it will self-heal. (An environment restart wipes the helpers; the
+next call re-injects them automatically.)
+
+### Every call fails with a connectivity / closed-environment error
+
+The queueserver must be running **with its environment open** — bait_mcp does not
+manage its lifecycle. Open the environment, and check `qserver.zmq_control_addr`
+matches the RE Manager's `qs-config.yml`.
+
+### Device calls fail but plans and discovery work
+
+The injected functions aren't permitted for your group. Add `read_device`/`set_device`
+to the group's `allowed_functions` (see [the instrument contract](#what-a-bits-repo-must-provide-the-instrument-contract))
+— injection buys "no `startup.py` edit," not "no config."
 
 ## Safety / HITL
 
