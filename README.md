@@ -145,7 +145,8 @@ on failure (e.g. queueserver unreachable, environment closed, unknown name).
 | `run_plan(name, args=None, kwargs=None)` | Execute a plan immediately. Requires the env open. Actuates — no HITL. |
 
 **Preconditions:** the queueserver must be running with its environment open, and
-the instrument must expose the functions above. When they aren't met, tools return
+the instrument must satisfy the contract above — permit the injected functions and
+expose an `oregistry`. When they aren't met, tools return
 `{"ok": false, "error": ...}` rather than hanging.
 
 ## Configuration reference

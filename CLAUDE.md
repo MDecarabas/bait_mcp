@@ -75,11 +75,11 @@ uv run bait-mcp-server --config configs/example.yaml  # frontend only (standalon
 # In the shared conda env (has bluesky-queueserver-api etc.):
 conda run -n bait_mcp_dev pip install -e .
 PYTHONPATH=src python -m pytest tests/ -q             # unit tests
-python -m ruff check src/bait_mcp tests               # lint (excludes dormant code)
+python -m ruff check src/bait_mcp tests               # lint
 ```
 
-Tests live in `tests/` (mock `REManagerAPI`; no live qserver needed). Ruff/mypy
-config is in `pyproject.toml`.
+Tests live in `tests/` (mock `REManagerAPI`; no live qserver needed). Ruff config
+is in `pyproject.toml`.
 
 ## HITL is a consumer concern — not implemented here
 
