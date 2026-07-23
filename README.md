@@ -200,7 +200,47 @@ matches the RE Manager's `qs-config.yml`.
 
 The injected functions aren't permitted for your group. Add `read_device`/`set_device`
 to the group's `allowed_functions` (see [the instrument contract](#what-a-bits-repo-must-provide-the-instrument-contract))
-— injection buys "no `startup.py` edit," not "no config."
+— injection buys "no `startup.py` edit," not "no config." After editing any
+`qserver/*.yaml`, reload permissions so the change takes effect (see below).
+
+### Edited a permissions/devices YAML but the change isn't visible
+
+**Symptom.** You edited `qserver/user_group_permissions.yaml` (e.g. permitted
+`read_device`/`set_device`, or changed which devices/plans bait_mcp's group may use)
+or `qserver/existing_plans_and_devices.yaml`, but `list_devices`/`list_plans` — or a
+device call — behave exactly as before.
+
+**Cause.** Discovery and the function gate read the RE Manager's **in-memory**
+permissions, not the files on disk. Editing a YAML changes nothing until the
+*running* queueserver reloads it. (bait_mcp itself does **not** need a restart — see
+Fix.)
+
+**Fix.** Tell the running queueserver to reload, then just call the tool again:
+
+```bash
+qserver permissions reload         # reload user_group_permissions.yaml (permissions only)
+qserver permissions reload lists   # also reload existing_plans_and_devices.yaml from disk
+```
+
+(Run `qserver` where it can reach the RE Manager; if the manager isn't at the
+default `tcp://localhost:60615`, pass `-a <qserver.zmq_control_addr>`.)
+
+- Plain `permissions reload` covers the common case — editing
+  **`user_group_permissions.yaml`** (allowing the injected functions, or changing
+  which *existing* devices/plans a group may use). No environment restart.
+- Use `permissions reload lists` when you also edited
+  **`existing_plans_and_devices.yaml`**. Note that list is generated when the
+  **environment opens** from the instrument's `startup.py`, so a *brand-new*
+  device/plan added in the instrument won't appear until you close and reopen the
+  environment (or regenerate the file) — a reload alone can't surface a device the
+  worker hasn't imported.
+
+No bait_mcp restart is needed: `permissions reload` always bumps the queueserver's
+`plans_allowed_uid`/`devices_allowed_uid`, and bait_mcp's discovery cache (inside
+`REManagerAPI`) invalidates on that UID — so the next `list_devices`/`list_plans`
+(within ~0.5 s, the client's status-cache TTL) refetches the new lists automatically.
+The API equivalents are `RM.permissions_reload()` and
+`RM.permissions_reload(restore_plans_devices=True)`.
 
 ## Safety / HITL
 
